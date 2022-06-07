@@ -6,15 +6,16 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/Azure/azure-sdk-for-go/profiles/latest/kusto/mgmt/kusto"
-	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/kusto/armkusto"
 	"github.com/olekukonko/tablewriter"
 )
 
 const (
-	subscriptionEnvVar      = "SUBSCRIPTION"
-	resourceGroupEnvVar     = "RESOURCE_GROUP"
-	locationEnvVar          = "LOCATION"
+	subscriptionEnvVar      = "AZURE_SUBSCRIPTION_ID"
+	resourceGroupEnvVar     = "AZURE_RESOURCE_GROUP"
+	locationEnvVar          = "AZURE_LOCATION"
 	clusterNamePrefixEnvVar = "CLUSTER_NAME_PREFIX"
 	dbNamePrefixEnvVar      = "DATABASE_NAME_PREFIX"
 
@@ -38,7 +39,7 @@ func init() {
 
 	rgName = os.Getenv(resourceGroupEnvVar)
 	if rgName == "" {
-		log.Fatalf("missing environment variable %s", rgName)
+		log.Fatalf("missing environment variable %s", resourceGroupEnvVar)
 	}
 
 	location = os.Getenv(locationEnvVar)
@@ -66,13 +67,16 @@ func main() {
 	deleteCluster(subscription, clusterNamePrefix+clusterName, rgName)
 }
 
-func getClustersClient(subscription string) kusto.ClustersClient {
-	client := kusto.NewClustersClient(subscription)
-	authR, err := auth.NewAuthorizerFromEnvironment()
+func getClustersClient(subscription string) *armkusto.ClustersClient {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	client.Authorizer = authR
+
+	client, err := armkusto.NewClustersClient(subscription, cred, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	return client
 }
@@ -83,21 +87,28 @@ func createCluster(sub, name, location, rgName string) {
 
 	numInstances := int32(1)
 	client := getClustersClient(sub)
-	result, err := client.CreateOrUpdate(ctx, rgName, name, kusto.Cluster{Location: &location, Sku: &kusto.AzureSku{Name: kusto.DevNoSLAStandardD11V2, Capacity: &numInstances, Tier: kusto.Basic}})
-
+	result, err := client.BeginCreateOrUpdate(
+		ctx,
+		rgName,
+		name,
+		armkusto.Cluster{
+			Location: &location,
+			SKU: &armkusto.AzureSKU{
+				Name:     to.Ptr(armkusto.AzureSKUNameDevNoSLAStandardD11V2),
+				Capacity: &numInstances,
+				Tier:     to.Ptr(armkusto.AzureSKUTierBasic),
+			},
+		},
+		nil,
+	)
 	if err != nil {
 		log.Fatal("failed to start cluster creation ", err)
 	}
 
 	log.Printf("waiting for cluster creation to complete - %s\n", name)
-	err = result.WaitForCompletionRef(context.Background(), client.Client)
+	r, err := result.PollUntilDone(ctx, nil)
 	if err != nil {
-		log.Fatal("error during cluster creation ", err)
-	}
-
-	r, err := result.Result(client)
-	if err != nil {
-		log.Fatal("cluster creation failed ", err)
+		log.Fatal(err)
 	}
 
 	log.Printf("created cluster %s\n", *r.Name)
@@ -107,15 +118,18 @@ func listClusters(sub, rgName string) {
 	log.Printf("listing clusters in resource group %s\n", rgName)
 	ctx := context.Background()
 
-	result, err := getClustersClient(sub).ListByResourceGroup(ctx, rgName)
-	if err != nil {
-		log.Fatal("failed to get clusters ", err)
-	}
+	result := getClustersClient(sub).NewListByResourceGroupPager(rgName, nil)
 
 	data := [][]string{}
 
-	for _, c := range *result.Value {
-		data = append(data, []string{*c.Name, string(c.State), *c.Location, strconv.Itoa(int(*c.Sku.Capacity)), *c.URI})
+	for result.More() {
+		temp, err := result.NextPage(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, c := range temp.Value {
+			data = append(data, []string{*c.Name, string(*c.Properties.State), *c.Location, strconv.Itoa(int(*c.SKU.Capacity)), *c.Properties.URI})
+		}
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
@@ -127,13 +141,16 @@ func listClusters(sub, rgName string) {
 	table.Render()
 }
 
-func getDBClient(subscription string) kusto.DatabasesClient {
-	client := kusto.NewDatabasesClient(subscription)
-	authR, err := auth.NewAuthorizerFromEnvironment()
+func getDBClient(subscription string) *armkusto.DatabasesClient {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	client.Authorizer = authR
+
+	client, err := armkusto.NewDatabasesClient(subscription, cred, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	return client
 }
@@ -142,23 +159,19 @@ func createDatabase(sub, rgName, clusterName, location, dbName string) {
 	ctx := context.Background()
 
 	client := getDBClient(sub)
-	future, err := client.CreateOrUpdate(ctx, rgName, clusterName, dbName, kusto.ReadWriteDatabase{Kind: kusto.KindReadWrite, Location: &location})
+	future, err := client.BeginCreateOrUpdate(ctx, rgName, clusterName, dbName, &armkusto.ReadWriteDatabase{Kind: to.Ptr(armkusto.KindReadWrite), Location: &location}, nil)
 
 	if err != nil {
 		log.Fatal("failed to start database creation ", err)
 	}
 
 	log.Printf("waiting for database creation to complete - %s\n", dbName)
-	err = future.WaitForCompletionRef(context.Background(), client.Client)
+	resp, err := future.PollUntilDone(ctx, nil)
 	if err != nil {
-		log.Fatal("failed to create database ", err)
+		log.Fatal(err)
 	}
 
-	r, err := future.Result(client)
-	if err != nil {
-		log.Fatal("database creation failed ", err)
-	}
-	kdb, _ := r.Value.AsReadWriteDatabase()
+	kdb := resp.GetDatabase()
 	log.Printf("created DB %s with ID %s and type %s\n", *kdb.Name, *kdb.ID, *kdb.Type)
 }
 
@@ -166,17 +179,19 @@ func listDatabases(sub, rgName, clusterName string) {
 	log.Printf("listing databases in cluster %s\n", clusterName)
 
 	ctx := context.Background()
-	result, err := getDBClient(sub).ListByCluster(ctx, rgName, clusterName)
-	if err != nil {
-		log.Fatal("failed to get databases in cluster ", err)
-	}
+	result := getDBClient(sub).NewListByClusterPager(rgName, clusterName, nil)
 
 	data := [][]string{}
 
-	for _, db := range *result.Value {
-		rwDB, isRW := db.AsReadWriteDatabase()
-		if isRW {
-			data = append(data, []string{*rwDB.Name, string(rwDB.ProvisioningState), *rwDB.Location, *rwDB.Type})
+	for result.More() {
+		temp, err := result.NextPage(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, db := range temp.Value {
+			if *db.GetDatabase().Kind == armkusto.KindReadWrite {
+				data = append(data, []string{*db.GetDatabase().Name, string(*db.GetDatabase().Kind), *db.GetDatabase().Location, *db.GetDatabase().Type})
+			}
 		}
 	}
 
@@ -192,55 +207,37 @@ func listDatabases(sub, rgName, clusterName string) {
 func deleteDatabase(sub, rgName, clusterName, dbName string) {
 	ctx := context.Background()
 
-	client := getDBClient(sub)
-	future, err := getDBClient(sub).Delete(ctx, rgName, clusterName, dbName)
-
+	future, err := getDBClient(sub).BeginDelete(ctx, rgName, clusterName, dbName, nil)
 	if err != nil {
 		log.Fatal("failed to start database deletion ", err)
 	}
 
 	log.Printf("waiting for database deletion to complete - %s\n", dbName)
-	err = future.WaitForCompletionRef(context.Background(), client.Client)
-	if err != nil {
-		log.Fatal("failed to delete database ", err)
-	}
 
-	r, err := future.Result(client)
+	_, err = future.PollUntilDone(ctx, nil)
 	if err != nil {
 		log.Fatal("database deletion process has not yet completed", err)
 	}
 
-	if r.StatusCode == 200 {
-		log.Printf("deleted DB %s from cluster %s", dbName, clusterName)
-	} else {
-		log.Println("failed to delete DB. response status code - ", r.StatusCode)
-	}
+	log.Printf("deleted DB %s from cluster %s", dbName, clusterName)
 }
 
 func deleteCluster(sub, clusterName, rgName string) {
 	ctx := context.Background()
 
 	client := getClustersClient(sub)
-	result, err := client.Delete(ctx, rgName, clusterName)
+	result, err := client.BeginDelete(ctx, rgName, clusterName, nil)
 
 	if err != nil {
 		log.Fatal("failed to start cluster deletion ", err)
 	}
 
 	log.Printf("waiting for cluster deletion to complete - %s\n", clusterName)
-	err = result.WaitForCompletionRef(context.Background(), client.Client)
-	if err != nil {
-		log.Fatal("error during cluster deletion ", err)
-	}
 
-	r, err := result.Result(client)
+	_, err = result.PollUntilDone(ctx, nil)
 	if err != nil {
 		log.Fatal("cluster deletion failed ", err)
 	}
 
-	if r.StatusCode == 200 {
-		log.Printf("deleted ADX cluster %s from resource group %s", clusterName, rgName)
-	} else {
-		log.Println("failed to delete ADX cluster. response status code - ", r.StatusCode)
-	}
+	log.Printf("deleted ADX cluster %s from resource group %s", clusterName, rgName)
 }

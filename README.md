@@ -47,10 +47,10 @@ When you run the sample code as is, the following actions are performed:
     export AZURE_CLIENT_ID="<enter service principal client ID>"
     export AZURE_CLIENT_SECRET="<enter service principal client secret>"
     export AZURE_TENANT_ID="<enter tenant ID>"
-
-    export SUBSCRIPTION="<enter subscription ID>"
-    export RESOURCE_GROUP="<enter resource group name>"
-    export LOCATION="<enter azure location e.g. Southeast Asia>"
+    
+    export AZURE_SUBSCRIPTION_ID="<enter subscription ID>"
+    export AZURE_RESOURCE_GROUP="<enter resource group name>"
+    export AZURE_LOCATION="<enter azure location e.g. Southeast Asia>"
 
     export CLUSTER_NAME_PREFIX="<enter prefix. name of cluster [prefix]-ADXTestCluster>"
     export DATABASE_NAME_PREFIX="<enter prefix. name of database [prefix]-ADXTestDB>"
